@@ -1,0 +1,179 @@
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+from tqdm import notebook
+import re
+import pandas as pd
+
+
+class ProductInfo:
+    def __init__(self, url, **kwargs):
+        for kw in kwargs:
+            if kw == 'title':
+                self.__title = kwargs[kw]
+            
+        self.url = url
+        self.rating = None 
+        self.name = None
+        self.price = None
+        self.brand = None
+        self.review_num = None
+        self.serving = None
+        self.weight = None
+        self.quantity = None
+        self.exp_date = None
+        self.__set_all_information()
+        self.__item_info = {'name':self.name, 'price':self.price, 'brand':self.brand, 
+                            'rating':self.rating, 'review_num':self.review_num, 'url':self.url, 
+                            'serving':self.serving, 'weight':self.weight, 'quantity':self.quantity, 'exp_date':self.exp_date}
+            
+    def __set_all_information(self):
+        self.header = {'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36'}
+        self.bs_resp = BeautifulSoup(requests.get(self.url, headers = self.header).text)
+        self.name = self.bs_resp.find('h2',class_ ='prod-buy-header__title').text
+        
+        # set brand ---------------
+        self.brand = self.bs_resp.find('a', class_ = 'prod-brand-name').get('data-brand-name')
+        if len(self.brand) == 0:
+            if '[' in self.name:
+                self.brand = self.name.split(']')[0].replace('[','').strip()
+            else:
+                self.brand = None
+    
+        # set price ---------------
+        pr = self.bs_resp.select('span.total-price > strong')
+        for bs in pr:
+            if len(bs.text) > 2 :
+                self.price = int(bs.text.replace('원','').replace(',',''))
+    
+        # set rating, review_num ---------------
+        product_id = self.url.split('?')[0].split('/')[-1]
+        # satisfaction
+        domain_satis = 'https://www.coupang.com/vp/product/reviews/summaries?'
+        res_satis = requests.get(domain_satis, headers = self.header, params = {'productId':product_id, 'viRoleCode':'3'})
+        bs_satis = BeautifulSoup(res_satis.text)
+        
+        bs_review = bs_satis.find('div', class_ = 'sdp-review__average__total-star__info-count')
+        if bs_review and (self.review_num is None) and (self.rating is None):
+            # set reviewnum
+            self.review_num = int(bs_review.text.replace(',',''))
+            # set rating
+            self.rating = float(bs_satis.find('div', class_ = 'sdp-review__average__total-star__info-orange').get('data-rating'))
+        
+        
+        # set weight, quantity, serving "from title" and 'from page' ---------------
+        wq_tag = self.bs_resp.find('span',class_ = 'value') # weight_quantity_tag
+        if wq_tag != None:
+            wq_tag = wq_tag.text
+
+        for where in [self.__title, self.name, wq_tag]:
+            if where is None:
+                continue
+                
+            word_list = re.split('[ ,,x,X,*,(,)]+',where+' , ')          
+            for word in word_list:
+                if any(d.isdigit() for d in word):
+                    word = word.strip()
+                    # set weight
+                    if ('g' in word) and (len(word) < 7):
+                        word = re.sub('[^0-9a-z]','',word)
+                        if 'kg' in word:
+                            self.weight = float(word.replace('kg',''))*1000 # g으로 단위 변환
+                        elif 'g' in word:
+                            self.weight = float(word.replace('g',''))
+                    # set quantity
+                    if (re.search(r'[개,세트,봉]',word)) and (len(word) < 5):
+                        self.quantity = re.sub('[^0-9가-힣]','',word)
+
+                    # set serving
+                    if (re.search(r'[인,인분]',word)) and (self.serving == None) :
+                        self.serving = re.sub('[^0-9가-힣]','', word)
+                        break
+
+        
+        # set exp_date, weight, quantity, serving "from page" -----------------
+        prod_attr_list = self.bs_resp.find_all('li',class_ = 'prod-attr-item')
+        for t in prod_attr_list:
+            tmp = t.text.split(':')
+            if ('유통기한' in tmp[0]) and (self.exp_date is None):
+                self.exp_date = tmp[1]
+            if ('중량' in tmp[0]) and (self.weight is None):
+                self.weight = tmp[1]
+            if ('총 수량' in tmp[0]) and (self.quantity is None):
+                self.quantity = tmp[1]
+            if (self.serving == None) and ('인분' in tmp[1]): # ~인분
+                self.serving = tmp[1]        
+
+    
+    def get_item_info(self, *args): # 호출
+        result_dict = dict()
+        if args[0] == 'all':
+            args = self.__item_info.keys()
+        for arg in args:
+            result_dict[arg] = self.__item_info[arg]
+        return result_dict
+
+
+
+
+    
+    
+    
+    
+    
+class CoupangProductList:
+    def __init__(self):
+        self.store = 'coupang'
+        self.domain = 'https://www.coupang.com/np/search'
+        self.header = {'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36'}
+
+    
+    
+    def get_product_list(self, keyword, num=5, sorter = 'scoreDesc', *args):
+        self.keyword = '"'+keyword+'"'
+        if 0 < num <= 30:
+            self.num = num
+        else:
+            raise ValueError('num을 30이하로 작성해주세요')
+        
+        if (sorter != 'saleCountDesc') and (sorter != 'scoreDesc'):
+            raise ValueError('sorter 값을 다시 입력해주세요\n-- sorter = saleCountDesc(판매량순) ,  scoreDesc(쿠팡 랭킹순)')
+        
+        self.key_list = [arg for arg in args]
+            
+        # sorter=saleCountDesc(판매량순) ,  scoreDesc(쿠팡 랭킹순)
+        # component: 카테고리 선택: 식품>냉장/냉동/간편요리> "밀키트" 
+        params = {'q':self.keyword, 'page':'1', 'component':'486587', 'rating':'0', 'sorter': sorter, 'listSize':'36'}
+        resp = requests.get(self.domain, headers = self.header, params = params)
+        print('*** ', resp, '\n-url:', resp.url)
+        bs_product_list = BeautifulSoup(resp.text).find_all('li', class_ = 'search-product')
+
+        product_list = []
+        cnt = 0 
+        for i, product in notebook.tqdm(enumerate(bs_product_list)):
+            b_ad = False
+            for class_ in product.get('class'):  # ['search-product', 'search-product__ad-badge']
+                if 'ad-badge' in class_:
+                    b_ad = True
+                    break
+            if b_ad:
+                continue
+            else:
+                if cnt < self.num:
+                    cnt += 1
+                    rat = product.find('em', class_ = 'rating')
+                    if rat:
+                        rating = float(rat.text)
+                    
+                    p_url = urljoin(self.domain, product.find('a').get('href'))
+                    p_info = {'title': product.find('div', class_ = 'name').text}
+                    p = ProductInfo(p_url, **p_info)
+                    pro_info = {'store':'coupang', 'ranking':cnt}
+                    pro_info.update(p.get_item_info(*self.key_list))    
+                    product_list.append(pro_info)
+                else:
+                    break
+        
+        result_pd = pd.DataFrame(product_list)
+
+        return result_pd #product_list
